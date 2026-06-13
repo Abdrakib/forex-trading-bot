@@ -7,5 +7,6 @@ __pycache__/
 *.pyc
 venv/
 .venv/
-trading_ai.db
-bot.log
+daily_review_output.txt
+database/cot_cache.json
+database/
