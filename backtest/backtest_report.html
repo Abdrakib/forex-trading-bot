@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Backtest Report - EUR_USD H1</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px;
+          margin: 40px auto; padding: 20px; color: #111; }
+  h1   { font-size: 24px; font-weight: 500; margin-bottom: 4px; }
+  .sub { color: #6b7280; font-size: 14px; margin-bottom: 30px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .card { background: #f9fafb; border: 0.5px solid #e5e7eb;
+            border-radius: 8px; padding: 14px; }
+  .card-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+  .card-value { font-size: 20px; font-weight: 500; }
+  .pos { color: #15803d; }
+  .neg { color: #dc2626; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; }
+  th    { background: #f3f4f6; padding: 8px 12px; text-align: left;
+            font-weight: 500; border-bottom: 1px solid #e5e7eb; }
+  td    { padding: 8px 12px; border-bottom: 0.5px solid #f3f4f6; }
+  .verdict { background: #f9fafb; border-left: 4px solid #65a30d;
+              border-radius: 4px; padding: 16px 20px; margin-bottom: 24px; }
+  .grade  { font-size: 40px; font-weight: 500; color: #65a30d;
+              float: right; margin-top: -8px; }
+  .section { font-size: 11px; font-weight: 500; color: #6b7280;
+               text-transform: uppercase; letter-spacing: 0.05em;
+               margin-bottom: 10px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<h1>Backtest Report — EUR_USD H1</h1>
+<div class="sub">Generated 2026-05-13 01:14 UTC |
+Starting balance: $10,000</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="card-label">Final Balance</div>
+    <div class="card-value pos">
+      $12,042.89
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total Return</div>
+    <div class="card-value pos">
+      +20.4%
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Win Rate</div>
+    <div class="card-value pos">
+      53.1%
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Max Drawdown</div>
+    <div class="card-value pos">
+      3.94%
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Profit Factor</div>
+    <div class="card-value pos">
+      2.24
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Expectancy</div>
+    <div class="card-value pos">
+      0.593 R
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Sharpe Ratio</div>
+    <div class="card-value pos">
+      6.2
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total Trades</div>
+    <div class="card-value">32</div>
+  </div>
+</div>
+
+<div class="verdict">
+  <div class="grade">B</div>
+  <strong style="font-size:16px">GOOD - Strategy has a real edge</strong><br>
+  <span style="color:#6b7280; font-size:13px; margin-top:4px; display:block">
+    Action: Deploy with half your planned capital, scale up after 1 month
+  </span>
+</div>
+
+<div class="section">Trade Statistics</div>
+<table>
+  <tr><th>Metric</th><th>Value</th><th>Metric</th><th>Value</th></tr>
+  <tr>
+    <td>Total Trades</td><td>32</td>
+    <td>Wins / Losses</td><td>17 / 15</td>
+  </tr>
+  <tr>
+    <td>Avg Win</td><td class="pos">$217.22</td>
+    <td>Avg Loss</td><td class="neg">$-109.99</td>
+  </tr>
+  <tr>
+    <td>Best Trade</td><td class="pos">$236.14</td>
+    <td>Worst Trade</td><td class="neg">$-119.26</td>
+  </tr>
+  <tr>
+    <td>Max Consec. Wins</td><td>4</td>
+    <td>Max Consec. Losses</td><td>4</td>
+  </tr>
+  <tr>
+    <td>Avg Duration</td><td>14.1 bars</td>
+    <td>Recovery Factor</td><td>5.18</td>
+  </tr>
+</table>
+
+<div class="section">Performance by Market Regime</div>
+<table>
+  <tr><th>Regime</th><th>Trades</th><th>Win Rate</th><th>Total P&L</th></tr>
+  
+        <tr>
+            <td>WEAK_TREND_DOWN</td>
+            <td>32</td>
+            <td style="color:#15803d">53.1%</td>
+            <td style="color:#15803d">
+                $2,042.89
+            </td>
+        </tr>
+</table>
+
+<div class="section">Issues Found</div>
+<ul><li style='color:#15803d'>No major issues found</li></ul>
+
+<div class="section">Recommended Improvements</div>
+<ul><li>Strategy is performing well</li></ul>
+
+</body>
+</html>
