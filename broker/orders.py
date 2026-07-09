@@ -25,18 +25,15 @@ HEADERS = {
 #  PLACE ORDER
 # ─────────────────────────────────────────────
 def place_order(instrument="XAU_USD", units=1, direction="buy",
-                stop_loss_pips=None, take_profit_pips=None):
+                stop_loss=None, take_profit=None):
     """
-    Place a market order.
+    Place a market order with mandatory stop loss and take profit prices.
+    """
+    if stop_loss is None or take_profit is None:
+        print(f"WARNING: Market order rejected for {instrument} — "
+              f"stop_loss and take_profit are required")
+        return None
 
-    Parameters
-    ----------
-    instrument       : e.g. "XAU_USD", "EUR_USD"
-    units            : lot size (1 unit = 1 oz of gold, etc.)
-    direction        : "buy" or "sell"
-    stop_loss_pips   : how many pips below/above entry to set SL
-    take_profit_pips : how many pips above/below entry to set TP
-    """
     if direction.lower() == "sell":
         units = -abs(units)
     else:
@@ -48,39 +45,17 @@ def place_order(instrument="XAU_USD", units=1, direction="buy",
             "instrument":    instrument,
             "units":         str(units),
             "timeInForce":   "FOK",
-            "positionFill":  "DEFAULT"
+            "positionFill":  "DEFAULT",
+            "stopLossOnFill": {
+                "price":       str(stop_loss),
+                "timeInForce": "GTC"
+            },
+            "takeProfitOnFill": {
+                "price":       str(take_profit),
+                "timeInForce": "GTC"
+            }
         }
     }
-
-    # get current price so we can calculate SL / TP
-    if stop_loss_pips or take_profit_pips:
-        from broker.oanda import get_price
-        current_price = get_price(instrument)
-
-        pip = 0.01 if "XAU" in instrument or "JPY" in instrument else 0.0001
-
-        if direction.lower() == "buy":
-            if stop_loss_pips:
-                sl_price = round(current_price - stop_loss_pips * pip, 5)
-                order_body["order"]["stopLossOnFill"] = {
-                    "price": str(sl_price), "timeInForce": "GTC"
-                }
-            if take_profit_pips:
-                tp_price = round(current_price + take_profit_pips * pip, 5)
-                order_body["order"]["takeProfitOnFill"] = {
-                    "price": str(tp_price), "timeInForce": "GTC"
-                }
-        else:
-            if stop_loss_pips:
-                sl_price = round(current_price + stop_loss_pips * pip, 5)
-                order_body["order"]["stopLossOnFill"] = {
-                    "price": str(sl_price), "timeInForce": "GTC"
-                }
-            if take_profit_pips:
-                tp_price = round(current_price - take_profit_pips * pip, 5)
-                order_body["order"]["takeProfitOnFill"] = {
-                    "price": str(tp_price), "timeInForce": "GTC"
-                }
 
     url      = f"{BASE_URL}/v3/accounts/{ACCOUNT_ID}/orders"
     response = requests.post(url, headers=HEADERS, json=order_body)

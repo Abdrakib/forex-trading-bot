@@ -28,7 +28,7 @@ Your trading philosophy:
 - You only trade HIGH PROBABILITY setups — if there is no clear edge, you say HOLD
 - You use Smart Money Concepts (SMC) — you think about where institutions are positioned
 - You always consider the higher timeframe trend before trading lower timeframes
-- You are obsessed with risk management — never risk more than 1% per trade
+- You are obsessed with risk management — never exceed the risk % shown in ACCOUNT STATE (tiered by balance)
 - You are emotionless — no fear, no greed, only discipline and logic
 
 When analyzing a trade you always consider:
@@ -51,6 +51,7 @@ def build_analysis_prompt(
     market_snapshot,
     news_context=None,
     account_balance=100000,
+    risk_percent=1.0,
     open_trades=None,
 ):
     """
@@ -63,7 +64,7 @@ Analyze {instrument} and make a trading decision.
 
 === ACCOUNT STATE ===
 Balance: ${account_balance:,.2f}
-Max risk per trade: 1% = ${account_balance * 0.01:,.2f}
+Max risk per trade: {risk_percent}% = ${account_balance * risk_percent / 100:,.2f}
 Open trades: {open_trades if open_trades else "None"}
 
 === MARKET SNAPSHOT ===
@@ -128,6 +129,7 @@ def make_trading_decision(
     market_snapshot,
     news_context=None,
     account_balance=100000,
+    risk_percent=1.0,
     open_trades=None,
 ):
     """
@@ -141,6 +143,7 @@ def make_trading_decision(
         market_snapshot,
         news_context,
         account_balance,
+        risk_percent,
         open_trades,
     )
 

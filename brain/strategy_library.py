@@ -124,7 +124,7 @@ STRATEGIES = {
     "SMC_INSTITUTIONAL": {
         "name":        "SMC Institutional",
         "description": "Pure Smart Money Concepts. Only trades at order blocks after liquidity sweeps.",
-        "best_regimes": ["ALL"],
+        "best_regimes": ["STRONG_TREND_UP", "STRONG_TREND_DOWN", "BREAKOUT"],
         "avoid_regimes": [],
         "entry_style":  "ORDER_BLOCK_LIMIT",
         "min_confidence": 70,
@@ -154,7 +154,7 @@ STRATEGIES = {
 #  SELECT BEST STRATEGY
 # ─────────────────────────────────────────────
 def select_strategy(regime_result, smc_result, macro_data,
-                     news_context="", atr_ratio=1.0):
+                     news_context="", atr_ratio=1.0, instrument=""):
     """
     Automatically select the best strategy for current conditions.
 
@@ -176,7 +176,7 @@ def select_strategy(regime_result, smc_result, macro_data,
            "ALL" in strategy.get("best_regimes", []):
             score += 3
         if regime in strategy.get("avoid_regimes", []):
-            score -= 5  # Strong penalty for wrong regime
+            score -= 2  # Penalty for wrong regime
 
         # ADX check
         min_adx = strategy.get("min_adx", 0)
@@ -213,6 +213,16 @@ def select_strategy(regime_result, smc_result, macro_data,
     # If no strategy fits well, default to mean reversion (our proven edge)
     if best_score < 0:
         best_strategy = "MEAN_REVERSION"
+
+    label = instrument or "PAIR"
+    print(
+        f"INFO {label} scores: "
+        f"TREND={scores.get('TREND_FOLLOWING', 0)} "
+        f"MEANREV={scores.get('MEAN_REVERSION', 0)} "
+        f"BREAKOUT={scores.get('BREAKOUT', 0)} "
+        f"SMC={scores.get('SMC_INSTITUTIONAL', 0)} "
+        f"NEWSFADE={scores.get('NEWS_FADE', 0)}"
+    )
 
     print(f"\nStrategy Selection:")
     print(f"   Regime        : {regime} (ADX: {adx:.1f})")

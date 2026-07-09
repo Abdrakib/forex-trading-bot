@@ -18,7 +18,7 @@ DB_PATH = Path(__file__).resolve().parent.parent / "database" / "trades.db"
 
 # ── Hard limits ──
 MAX_DAILY_TRADES     = 6      # Never more than 6 trades per day
-MAX_OPEN_TRADES      = 3      # Never more than 3 open at once
+MAX_OPEN_TRADES      = 999    # No open-position cap; only daily limit applies
 MIN_TRADE_SPACING    = 30     # Minutes between any two trades
 MAX_DAILY_LOSS_PCT   = 3.0    # Stop trading if down 3% in a day
 MAX_DRAWDOWN_PCT     = 10.0   # Reduce size if down 10% from peak
@@ -58,28 +58,42 @@ def get_dynamic_risk_percent(account_balance, drawdown_pct=0):
 # ─────────────────────────────────────────────
 #  POSITION SIZING
 # ─────────────────────────────────────────────
-def calculate_position_size(account_balance, risk_percent,
-                              stop_loss_pips, instrument="EUR_USD"):
-    """Calculate exact units based on dynamic risk."""
-    if stop_loss_pips <= 0:
+def calculate_position_size(account_balance, risk_percent, entry_price, stop_loss,
+                              instrument, quote_conversion_rate=None):
+    """
+    Universal position sizing:
+    risk_amount (USD) = balance * risk%
+    stop_distance = |entry - stop_loss| in quote currency per unit
+    units = risk_amount / (stop_distance * quote_to_usd_rate)
+    """
+    risk_amount = account_balance * (risk_percent / 100)
+    stop_distance = abs(entry_price - stop_loss)
+    if stop_distance <= 0:
         return 0
 
-    risk_amount = account_balance * (risk_percent / 100)
-
-    if "JPY" in instrument:
-        pip_value = 0.01
-    elif "XAU" in instrument:
-        pip_value = 0.01
+    # Convert quote currency to USD
+    quote = instrument.split("_")[1]
+    if quote == "USD":
+        conversion = 1.0
+    elif instrument.startswith("USD_"):
+        # e.g. USD_JPY: quote is JPY, 1 JPY = 1/price USD
+        conversion = 1.0 / entry_price
     else:
-        pip_value = 0.0001
+        # Cross pairs (EUR_GBP etc): use provided rate or approximate
+        conversion = quote_conversion_rate if quote_conversion_rate else 1.0
 
-    units = int(risk_amount / (stop_loss_pips * pip_value))
+    units = int(risk_amount / (stop_distance * conversion))
+
+    # Sanity caps: never exceed 50,000 units, never below 100
+    units = max(min(units, 50000), 0)
 
     print(f"\nPosition Size:")
     print(f"   Balance    : ${account_balance:,.2f}")
     print(f"   Risk %     : {risk_percent}%")
     print(f"   Risk $     : ${risk_amount:,.2f}")
-    print(f"   SL Pips    : {stop_loss_pips}")
+    print(f"   Entry      : {entry_price}")
+    print(f"   Stop Loss  : {stop_loss}")
+    print(f"   SL Dist    : {stop_distance}")
     print(f"   Units      : {units:,}")
 
     return units
@@ -161,10 +175,18 @@ def check_drawdown(account_balance, peak_balance):
 # ─────────────────────────────────────────────
 #  DAILY TRADE COUNT
 # ─────────────────────────────────────────────
+def is_trading_weekday():
+    """Return False on Saturday/Sunday UTC — no new trades on weekends."""
+    return datetime.now(timezone.utc).weekday() < 5
+
+
 def get_daily_trade_count():
-    """Count how many trades have been placed today."""
+    """Count filled/placed trades today (excludes pending LIMIT_ orders)."""
     if not DB_PATH.exists():
         return 0
+
+    if not is_trading_weekday():
+        return MAX_DAILY_TRADES  # Treat weekend as at daily cap
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -174,6 +196,7 @@ def get_daily_trade_count():
         c.execute("""
             SELECT COUNT(*) FROM trades
             WHERE open_time LIKE ? AND trade_id NOT LIKE 'TEST%'
+            AND trade_id NOT LIKE 'LIMIT_%'
         """, (f"{today}%",))
         count = c.fetchone()[0]
         conn.close()
@@ -314,13 +337,14 @@ def full_risk_check(account_balance, starting_balance,
         all_passed = False
         block_reason.append(f"Drawdown too large ({drawdown_pct:.1f}%)")
 
-    # 3. Max open trades
-    if open_trade_count >= MAX_OPEN_TRADES:
-        all_passed = False
-        block_reason.append(f"Max open trades reached ({MAX_OPEN_TRADES})")
-        print(f"\nOpen Trades: {open_trade_count}/{MAX_OPEN_TRADES} - AT LIMIT")
+    # 3. Max open trades (no practical cap — margin-limited only)
+    print(f"\nOpen Trades: {open_trade_count} (no open-position cap)")
 
     # 4. Daily trade count
+    if not is_trading_weekday():
+        all_passed = False
+        block_reason.append("Weekend — no new trades (Mon-Fri only)")
+        print(f"\nWeekday Check: SAT/SUN UTC — no new trades")
     daily_count = get_daily_trade_count()
     if daily_count >= MAX_DAILY_TRADES:
         all_passed = False
@@ -359,11 +383,8 @@ def full_risk_check(account_balance, starting_balance,
         block_reason.append("Risk % is 0 - drawdown protection")
         units = 0
     else:
-        sl, tp, pips = calculate_atr_stop_loss(
-            entry_price, atr, direction, instrument=instrument
-        )
         units = calculate_position_size(
-            account_balance, risk_pct, pips, instrument
+            account_balance, risk_pct, entry_price, stop_loss, instrument
         )
         if units <= 0:
             all_passed = False

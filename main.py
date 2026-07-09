@@ -1,3 +1,4 @@
+# DEPRECATED - do not run. Use main_advanced.py
 """
 Trading AI - Advanced Autonomous Trading System
 Multi-pair scanner, session intelligence, correlation filter,
@@ -68,7 +69,7 @@ def startup():
     print(f"Active Pairs     : {', '.join(active_pairs)}")
     print(f"Loop Interval    : Every {LOOP_INTERVAL // 60} minutes")
     print(f"Max Daily Trades : 6")
-    print(f"Max Open Trades  : 3")
+    print(f"Open Positions   : no cap (margin-limited)")
     print(f"Trade Spacing    : 30 minutes minimum")
 
     rules = get_rules_context()
@@ -82,7 +83,7 @@ def startup():
 # ─────────────────────────────────────────────
 #  SCAN ONE PAIR
 # ─────────────────────────────────────────────
-def scan_pair(instrument, news_context, rules_context):
+def scan_pair(instrument, news_context, rules_context, account_balance=None):
     """
     Fully analyze one pair and return AI decision with confidence score.
     Returns (decision_dict, h1_summary) or (None, None) on error.
@@ -104,12 +105,18 @@ def scan_pair(instrument, news_context, rules_context):
 
         full_context = f"{news_context}\n\n{rules_context}"
 
+        balance = account_balance if account_balance is not None else (STARTING_BALANCE or 100000)
+        peak = PEAK_BALANCE or balance
+        drawdown_pct = ((peak - balance) / peak * 100) if peak > 0 else 0
+        risk_pct = get_dynamic_risk_percent(balance, drawdown_pct)
+
         decision = make_trading_decision(
             instrument      = instrument,
             mtf_summaries   = mtf_summaries,
             market_snapshot = snapshot,
             news_context    = full_context,
-            account_balance = STARTING_BALANCE or 100000
+            account_balance = balance,
+            risk_percent    = risk_pct,
         )
 
         return decision, h1_summary, snapshot
@@ -213,7 +220,8 @@ def run_trading_cycle(cycle_number):
 
     for instrument in active_pairs:
         print(f"\n  Analyzing {instrument}...")
-        result = scan_pair(instrument, full_news, rules_context)
+        result = scan_pair(instrument, full_news, rules_context,
+                           account_balance=account_balance)
 
         if result[0] is None:
             continue
@@ -257,16 +265,12 @@ def run_trading_cycle(cycle_number):
 
     # ── Step 10: Execute top setups ──
     trades_placed = 0
-    max_new_trades = min(2, 6 - daily_count, 3 - open_trade_count)
+    max_new_trades = 6 - daily_count
 
     print(f"\nStep 8: Can place up to {max_new_trades} new trades this cycle.")
 
     for instrument, confidence, decision, h1_summary, snapshot in filtered_pairs:
         if trades_placed >= max_new_trades:
-            break
-
-        if open_trade_count >= 3:
-            print("Max open trades reached.")
             break
 
         action      = decision.get("decision")
@@ -302,9 +306,11 @@ def run_trading_cycle(cycle_number):
 
         if approved and units > 0:
             fill = place_order(
-                instrument = instrument,
-                units      = units,
-                direction  = direction
+                instrument  = instrument,
+                units       = units,
+                direction   = direction,
+                stop_loss   = stop_loss,
+                take_profit = take_profit,
             )
 
             if fill:

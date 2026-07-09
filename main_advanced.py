@@ -1,5 +1,5 @@
 """
-Trading AI - Final Complete Advanced System v3.0
+Trading AI - Final Complete Advanced System v4.1
 Integrates everything:
 - 5-strategy library with automatic switching
 - Limit order entries at order blocks / ATR pullbacks
@@ -41,7 +41,7 @@ from data.macro_filters import get_macro_context
 from brain.decision       import make_trading_decision, print_decision
 from brain.risk           import (full_risk_check, check_daily_loss_limit,
                                    check_drawdown, get_daily_trade_count,
-                                   calculate_atr_stop_loss)
+                                   calculate_atr_stop_loss, get_dynamic_risk_percent)
 from brain.execution      import manage_open_trade
 from brain.limit_orders   import (calculate_limit_entry,
                                    calculate_smc_limit_entry,
@@ -87,7 +87,7 @@ def startup():
     global STARTING_BALANCE, PEAK_BALANCE, COT_CACHE, COT_LAST_RUN
 
     print("\n" + "=" * 60)
-    print("  TRADING AI v3.0 - FULL ADVANCED SYSTEM")
+    print("  TRADING AI v4.1 - FULL ADVANCED SYSTEM")
     print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print("  SMC + Regime + Macro + COT + 5 Strategies + Limit Orders")
     print("=" * 60)
@@ -116,9 +116,9 @@ def startup():
     rules = get_rules_context()
     print(f"\nLoaded Rules:\n{rules}")
 
-    alert_startup(STARTING_BALANCE, f"v3.0 | {session_name} | 5 Strategies")
+    alert_startup(STARTING_BALANCE, f"v4.1 | {session_name} | 5 Strategies")
     send_message(
-        "<b>Trading AI v3.0 Started</b>\n\n"
+        "<b>Trading AI v4.1 Started</b>\n\n"
         "Active modules:\n"
         "- 5-Strategy Library (auto-switching)\n"
         "- Limit Order Entries\n"
@@ -214,7 +214,8 @@ def manage_existing_trades():
 # ─────────────────────────────────────────────
 #  FULL PAIR ANALYSIS
 # ─────────────────────────────────────────────
-def analyze_pair(instrument, news_context, rules_context, cot_context=""):
+def analyze_pair(instrument, news_context, rules_context, cot_context="",
+                 account_balance=None):
     """
     Complete analysis of one pair using all modules.
     Returns structured result or None if no opportunity.
@@ -256,7 +257,8 @@ def analyze_pair(instrument, news_context, rules_context, cot_context=""):
             smc_result    = smc_result,
             macro_data    = macro_data,
             news_context  = news_context,
-            atr_ratio     = atr_ratio
+            atr_ratio     = atr_ratio,
+            instrument    = instrument,
         )
 
         strategy_context = get_strategy_context(strategy_name, strategy_config)
@@ -288,13 +290,19 @@ def analyze_pair(instrument, news_context, rules_context, cot_context=""):
             f"{rules_context}"
         )
 
+        balance = account_balance if account_balance is not None else (STARTING_BALANCE or 100000)
+        peak = PEAK_BALANCE or balance
+        drawdown_pct = ((peak - balance) / peak * 100) if peak > 0 else 0
+        risk_pct = get_dynamic_risk_percent(balance, drawdown_pct)
+
         # Ask AI brain for decision
         decision = make_trading_decision(
             instrument      = instrument,
             mtf_summaries   = mtf_summaries,
             market_snapshot = snapshot,
             news_context    = full_context,
-            account_balance = STARTING_BALANCE or 100000
+            account_balance = balance,
+            risk_percent    = risk_pct,
         )
 
         if not decision:
@@ -314,8 +322,8 @@ def analyze_pair(instrument, news_context, rules_context, cot_context=""):
         )
 
         if not valid:
-            print(f"   {instrument}: Signal rejected — {reason}")
-            decision["confidence"] = max(0, confidence - 20)
+            print(f"   {instrument}: Signal rejected — {reason} — SKIPPING trade")
+            return None
 
         # COT confirmation boost/penalty
         if action == "BUY" and cot_bias == "BEARISH":
@@ -488,9 +496,11 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
 
     # Market order (for breakouts or if limit failed)
     fill = place_order(
-        instrument = instrument,
-        units      = units,
-        direction  = direction
+        instrument  = instrument,
+        units       = units,
+        direction   = direction,
+        stop_loss   = stop_loss,
+        take_profit = take_profit,
     )
 
     if fill:
@@ -618,7 +628,8 @@ def run_trading_cycle(cycle_number):
 
     for instrument in active_pairs:
         print(f"\n  [{instrument}]")
-        result = analyze_pair(instrument, full_news, rules_ctx)
+        result = analyze_pair(instrument, full_news, rules_ctx,
+                              account_balance=account_balance)
 
         if not result:
             continue
@@ -652,11 +663,11 @@ def run_trading_cycle(cycle_number):
         print(f"\nAfter correlation filter: {[p[0] for p in scored_pairs]}")
 
     # ── Execute top setups ──
-    max_new  = min(2, 6 - daily_count, 3 - open_trade_count)
+    max_new  = 6 - daily_count
     placed   = 0
 
     for instrument, confidence, result in scored_pairs:
-        if placed >= max_new or open_trade_count >= 3:
+        if placed >= max_new:
             break
 
         print(f"\nAttempting trade on {instrument} ({confidence}% confidence)...")
