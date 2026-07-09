@@ -31,6 +31,13 @@ HEADERS = {
     "Content-Type":  "application/json"
 }
 
+ENTRY_ORDER_TYPES = {"LIMIT", "STOP", "MARKET_IF_TOUCHED"}
+
+
+def _filter_entry_orders(raw_orders):
+    """Keep only pending entry orders; exclude SL/TP/trailing attached to trades."""
+    return [o for o in raw_orders if o.get("type") in ENTRY_ORDER_TYPES]
+
 
 # ─────────────────────────────────────────────
 #  CALCULATE LIMIT ENTRY PRICE
@@ -210,22 +217,33 @@ def place_limit_order(instrument, units, direction, limit_price,
 #  GET PENDING ORDERS
 # ─────────────────────────────────────────────
 def get_pending_orders():
-    """Get all pending limit orders."""
+    """Get pending entry orders (LIMIT/STOP/MARKET_IF_TOUCHED only)."""
     url      = f"{BASE_URL}/v3/accounts/{ACCOUNT_ID}/orders"
     response = requests.get(url, headers=HEADERS)
     data     = response.json()
-    orders   = data.get("orders", [])
+    raw_orders = data.get("orders", [])
+    orders   = _filter_entry_orders(raw_orders)
 
     if not orders:
-        print("No pending orders.")
+        if raw_orders:
+            print(f"No pending entry orders ({len(raw_orders)} SL/TP orders excluded).")
+        else:
+            print("No pending orders.")
         return []
 
-    print(f"\nPending Orders ({len(orders)}):")
+    print(f"\nPending Entry Orders ({len(orders)}):")
     print("-" * 52)
     for o in orders:
+        order_id   = o.get("id")
+        instrument = o.get("instrument")
+        price      = o.get("price")
+        if not order_id or not instrument or price is None:
+            print(f"WARNING: Skipping order — missing id/instrument/price "
+                  f"(type={o.get('type')}, id={order_id})")
+            continue
         direction = "BUY " if float(o.get("units", 0)) > 0 else "SELL"
-        print(f"   ID: {o['id']:<8} | {direction} {o['instrument']:<10} "
-              f"| Limit: {o['price']}")
+        print(f"   ID: {order_id:<8} | {direction} {instrument:<10} "
+              f"| Limit: {price}")
     print("-" * 52)
     return orders
 
@@ -245,11 +263,18 @@ def cancel_order(order_id):
 
 
 def cancel_all_pending_orders():
-    """Cancel all pending limit orders."""
+    """Cancel all pending entry orders (not SL/TP on open trades)."""
     orders = get_pending_orders()
+    cancelled = 0
     for order in orders:
-        cancel_order(order["id"])
-    print(f"Cancelled {len(orders)} pending orders.")
+        order_id = order.get("id")
+        if not order_id:
+            print(f"WARNING: Skipping cancel — order missing id "
+                  f"(type={order.get('type')})")
+            continue
+        if cancel_order(order_id):
+            cancelled += 1
+    print(f"Cancelled {cancelled} pending entry order(s).")
 
 
 if __name__ == "__main__":

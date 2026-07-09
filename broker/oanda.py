@@ -22,11 +22,14 @@ def get_account_summary():
     response = requests.get(url, headers=HEADERS)
     data = response.json()
 
-    account = data["account"]
-    print(f"✅ Account ID:       {account['id']}")
-    print(f"✅ Balance:          ${float(account['balance']):,.2f}")
-    print(f"✅ Open Trades:      {account['openTradeCount']}")
-    print(f"✅ Unrealized P&L:   ${float(account['unrealizedPL']):,.2f}")
+    account = data.get("account") or {}
+    if not account.get("id"):
+        print(f"WARNING: Account summary missing id: {data}")
+        return account
+    print(f"✅ Account ID:       {account.get('id')}")
+    print(f"✅ Balance:          ${float(account.get('balance', 0)):,.2f}")
+    print(f"✅ Open Trades:      {account.get('openTradeCount', 0)}")
+    print(f"✅ Unrealized P&L:   ${float(account.get('unrealizedPL', 0)):,.2f}")
     return account
 
 def get_price(instrument="XAU_USD"):
@@ -40,8 +43,18 @@ def get_price(instrument="XAU_USD"):
     response = requests.get(url, headers=HEADERS, params=params)
     data = response.json()
 
-    candle = data["candles"][0]
-    close_price = float(candle["mid"]["c"])
+    candles = data.get("candles") or []
+    if not candles:
+        print(f"WARNING: No candles returned for {instrument}: {data}")
+        return None
+
+    candle = candles[0]
+    mid = candle.get("mid") or {}
+    close_price = mid.get("c")
+    if close_price is None:
+        print(f"WARNING: Candle missing close price for {instrument}: {candle}")
+        return None
+    close_price = float(close_price)
     print(f"✅ {instrument:<12} Price: ${close_price:,.5f}")
     return close_price
 
@@ -72,9 +85,13 @@ def get_open_trades():
     else:
         print(f"\n📂 Open Trades ({len(trades)}):")
         for trade in trades:
-            instrument = trade["instrument"]
-            units      = trade["currentUnits"]
-            pl         = float(trade["unrealizedPL"])
+            instrument = trade.get("instrument")
+            units      = trade.get("currentUnits")
+            if not instrument or units is None:
+                print(f"WARNING: Skipping trade with missing fields: "
+                      f"id={trade.get('id')} instrument={instrument}")
+                continue
+            pl         = float(trade.get("unrealizedPL", 0))
             direction  = "BUY 🟢" if float(units) > 0 else "SELL 🔴"
             print(f"   {direction} {instrument} | Units: {units} | P&L: ${pl:,.2f}")
     return trades

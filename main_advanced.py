@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import sqlite3
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -95,7 +96,7 @@ def startup():
     init_database()
 
     account          = get_account_summary()
-    STARTING_BALANCE = float(account["balance"])
+    STARTING_BALANCE = float(account.get("balance", 0))
     PEAK_BALANCE     = STARTING_BALANCE
 
     _, session_name, active_pairs, _ = get_session_context()
@@ -110,7 +111,8 @@ def startup():
         COT_CACHE   = get_weekly_cot_summary()
         COT_LAST_RUN = datetime.now(timezone.utc)
     except Exception as e:
-        print(f"COT load warning: {e}")
+        tb = traceback.format_exc()
+        print(f"\nCOT load warning: {e}\n{tb}")
 
     # Load learned rules
     rules = get_rules_context()
@@ -153,7 +155,8 @@ def update_cot_if_needed():
             COT_LAST_RUN = now
             print("COT data updated.")
         except Exception as e:
-            print(f"COT update error: {e}")
+            tb = traceback.format_exc()
+            print(f"COT update error: {e}\n{tb}")
 
 
 # ─────────────────────────────────────────────
@@ -181,7 +184,11 @@ def manage_existing_trades():
     c    = conn.cursor()
 
     for trade in open_trades:
-        trade_id = str(trade["id"])
+        trade_id = trade.get("id")
+        if not trade_id:
+            print(f"WARNING: Skipping trade with missing id: {trade}")
+            continue
+        trade_id = str(trade_id)
         units    = abs(float(trade.get("currentUnits", 1)))
 
         c.execute("""
@@ -372,7 +379,8 @@ def analyze_pair(instrument, news_context, rules_context, cot_context="",
         }
 
     except Exception as e:
-        print(f"   Error analyzing {instrument}: {e}")
+        tb = traceback.format_exc()
+        print(f"   Error analyzing {instrument}: {e}\n{tb}")
         return None
 
 
@@ -504,14 +512,19 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
     )
 
     if fill:
-        trade_id = fill["tradeOpened"]["tradeID"]
+        trade_opened = fill.get("tradeOpened") or {}
+        trade_id = trade_opened.get("tradeID")
+        fill_price = fill.get("price")
+        if not trade_id or not fill_price:
+            print(f"WARNING: Market fill missing tradeID or price: {fill}")
+            return False
 
         log_trade_open(
             trade_id      = trade_id,
             instrument    = instrument,
             direction     = direction,
             units         = units,
-            entry_price   = float(fill["price"]),
+            entry_price   = float(fill_price),
             stop_loss     = stop_loss,
             take_profit   = take_profit,
             indicators    = h1_summary,
@@ -524,7 +537,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
             instrument = instrument,
             direction  = action,
             units      = units,
-            entry      = fill["price"],
+            entry      = fill_price,
             sl         = stop_loss,
             tp         = take_profit,
             confidence = confidence,
@@ -532,7 +545,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
                         decision.get("reasoning", "")[:200]
         )
 
-        print(f"   Market order filled at {fill['price']}")
+        print(f"   Market order filled at {fill_price}")
         return True
 
     return False
@@ -571,8 +584,8 @@ def run_trading_cycle(cycle_number):
 
     # ── Account state ──
     account          = get_account_summary()
-    account_balance  = float(account["balance"])
-    open_trade_count = int(account["openTradeCount"])
+    account_balance  = float(account.get("balance", 0))
+    open_trade_count = int(account.get("openTradeCount", 0))
 
     if account_balance > PEAK_BALANCE:
         PEAK_BALANCE = account_balance
@@ -689,7 +702,7 @@ def run_trading_cycle(cycle_number):
 
     # ── Check for broker-closed trades ──
     current_open = get_open_trades()
-    open_ids     = [str(t["id"]) for t in current_open]
+    open_ids     = [str(t.get("id")) for t in current_open if t.get("id")]
 
     if DB_PATH.exists():
         conn = sqlite3.connect(DB_PATH)
@@ -719,7 +732,8 @@ def run_trading_cycle(cycle_number):
                     )
                     print(f"Trade {db_id} closed. P&L: ${pnl:.2f}")
                 except Exception as e:
-                    print(f"Error logging closed trade {db_id}: {e}")
+                    tb = traceback.format_exc()
+                    print(f"Error logging closed trade {db_id}: {e}\n{tb}")
         conn.close()
 
     # ── Feedback loop ──
@@ -771,9 +785,9 @@ def main():
             alert_error("AI stopped manually by user.")
             break
         except Exception as e:
-            error = str(e)
-            print(f"\nCycle error: {error}")
-            alert_error(f"Cycle {cycle} error: {error[:200]}")
+            tb = traceback.format_exc()
+            print(f"\nCycle {cycle} error: {e}\n{tb}")
+            alert_error(f"Cycle {cycle} error: {str(e)[:100]}\n{tb[-300:]}")
             time.sleep(60)
             continue
 

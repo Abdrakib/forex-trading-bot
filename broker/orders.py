@@ -62,14 +62,19 @@ def place_order(instrument="XAU_USD", units=1, direction="buy",
     data     = response.json()
 
     if "orderFillTransaction" in data:
-        fill      = data["orderFillTransaction"]
-        price     = fill["price"]
+        fill      = data.get("orderFillTransaction") or {}
+        price     = fill.get("price")
+        trade_opened = fill.get("tradeOpened") or {}
+        trade_id  = trade_opened.get("tradeID")
+        if not price or not trade_id:
+            print(f"WARNING: Order fill missing price or tradeID: {fill}")
+            return None
         dir_label = "BUY" if units > 0 else "SELL"
         print(f"\nOrder Placed!")
         print(f"   {dir_label} {instrument}")
         print(f"   Units:      {abs(units)}")
         print(f"   Fill Price: ${float(price):,.5f}")
-        print(f"   Trade ID:   {fill['tradeOpened']['tradeID']}")
+        print(f"   Trade ID:   {trade_id}")
         return fill
     else:
         print(f"\nOrder failed: {data}")
@@ -87,8 +92,8 @@ def close_trade(trade_id):
     data     = response.json()
 
     if "orderFillTransaction" in data:
-        fill   = data["orderFillTransaction"]
-        pl     = float(fill["pl"])
+        fill   = data.get("orderFillTransaction") or {}
+        pl     = float(fill.get("pl", 0))
         result = "PROFIT" if pl >= 0 else "LOSS"
         print(f"\nTrade {trade_id} closed. {result}: ${pl:,.2f}")
         return fill
@@ -111,14 +116,21 @@ def close_all_trades():
         return
 
     # Sort by ID ascending - close oldest first (FIFO rule)
-    trades = sorted(trades, key=lambda x: int(x["id"]))
+    trades = sorted(
+        [t for t in trades if t.get("id")],
+        key=lambda x: int(x.get("id", 0))
+    )
 
     print(f"\nKILL SWITCH - Closing all {len(trades)} open trade(s)...")
     total_pl = 0.0
     for trade in trades:
-        fill = close_trade(trade["id"])
+        tid = trade.get("id")
+        if not tid:
+            print(f"WARNING: Skipping trade with missing id: {trade}")
+            continue
+        fill = close_trade(tid)
         if fill:
-            total_pl += float(fill["pl"])
+            total_pl += float(fill.get("pl", 0))
 
     result = "PROFIT" if total_pl >= 0 else "LOSS"
     print(f"\nAll trades closed. Total {result}: ${total_pl:,.2f}")
@@ -140,11 +152,18 @@ def get_open_trades():
     print(f"\nOpen Trades ({len(trades)}):")
     print("-" * 52)
     for t in trades:
-        direction = "BUY " if float(t["currentUnits"]) > 0 else "SELL"
-        pl        = float(t["unrealizedPL"])
+        tid        = t.get("id")
+        instrument = t.get("instrument")
+        units_raw  = t.get("currentUnits")
+        if not tid or not instrument or units_raw is None:
+            print(f"WARNING: Skipping trade with missing fields: id={tid} "
+                  f"instrument={instrument}")
+            continue
+        direction = "BUY " if float(units_raw) > 0 else "SELL"
+        pl        = float(t.get("unrealizedPL", 0))
         result    = "+" if pl >= 0 else ""
-        print(f"   ID: {t['id']:<8} | {direction} {t['instrument']:<10} "
-              f"| Units: {abs(float(t['currentUnits'])):<6} "
+        print(f"   ID: {tid:<8} | {direction} {instrument:<10} "
+              f"| Units: {abs(float(units_raw)):<6} "
               f"| P&L: {result}${pl:,.2f}")
     print("-" * 52)
     return trades
@@ -193,17 +212,20 @@ if __name__ == "__main__":
     )
 
     if fill:
-        trade_id = fill["tradeOpened"]["tradeID"]
+        trade_opened = fill.get("tradeOpened") or {}
+        trade_id = trade_opened.get("tradeID")
+        if not trade_id:
+            print("WARNING: Test fill missing tradeID")
+        else:
+            # 3. Show it open
+            get_open_trades()
 
-        # 3. Show it open
-        get_open_trades()
+            # 4. Close it immediately
+            print(f"\nStep 3: Closing trade {trade_id}...")
+            close_trade(trade_id)
 
-        # 4. Close it immediately
-        print(f"\nStep 3: Closing trade {trade_id}...")
-        close_trade(trade_id)
-
-        # 5. Confirm clean
-        get_open_trades()
+            # 5. Confirm clean
+            get_open_trades()
 
     print("\n" + "=" * 52)
     print("Order system test complete!")

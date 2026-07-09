@@ -74,8 +74,8 @@ def partial_close(trade_id, units_to_close):
         data     = response.json()
 
         if "orderFillTransaction" in data:
-            fill = data["orderFillTransaction"]
-            pl   = float(fill["pl"])
+            fill = data.get("orderFillTransaction") or {}
+            pl   = float(fill.get("pl", 0))
             print(f"Partial close: {units_to_close} units | P&L: ${pl:,.2f}")
             return True, pl
         else:
