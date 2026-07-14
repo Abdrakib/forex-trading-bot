@@ -58,31 +58,70 @@ def get_dynamic_risk_percent(account_balance, drawdown_pct=0):
 # ─────────────────────────────────────────────
 #  POSITION SIZING
 # ─────────────────────────────────────────────
-# Last-resort ceiling only — formula itself must produce sane sizes.
-MAX_POSITION_UNITS = 20000
+# Use at most this fraction of free margin for any single new trade.
+MARGIN_USAGE_FRACTION = 0.30
+# Absolute last-resort sanity check — only catches bad data / API glitches.
+HARD_MAX_UNITS = 500_000
+
+
+def _base_to_home_usd(instrument, entry_price, quote_conversion_rate=None):
+    """
+    USD value of 1 unit of BASE currency (account assumed USD home).
+    EUR_USD / AUD_USD: base→USD = entry_price
+    USD_JPY:           base→USD = 1.0
+    """
+    parts = instrument.split("_")
+    if len(parts) != 2:
+        return float(entry_price)
+    base, quote = parts
+    if base == "USD":
+        return 1.0
+    if quote == "USD":
+        return float(entry_price)
+    # Cross pair: convert quote→USD if given, else approximate with entry
+    q_to_usd = float(quote_conversion_rate) if quote_conversion_rate else 1.0
+    return float(entry_price) * q_to_usd
+
+
+def margin_safe_units(instrument, entry_price, margin_available, margin_rate,
+                       quote_conversion_rate=None):
+    """
+    Max units that consume at most MARGIN_USAGE_FRACTION of free margin.
+    OANDA approx: margin ≈ units * marginRate * (base value in home currency).
+    """
+    if margin_available is None or margin_rate is None:
+        return HARD_MAX_UNITS
+    margin_available = float(margin_available)
+    margin_rate = float(margin_rate)
+    if margin_available <= 0 or margin_rate <= 0 or entry_price <= 0:
+        return 0
+
+    base_to_home = _base_to_home_usd(instrument, entry_price, quote_conversion_rate)
+    margin_per_unit = margin_rate * base_to_home
+    if margin_per_unit <= 0:
+        return 0
+
+    budget = margin_available * MARGIN_USAGE_FRACTION
+    return int(budget / margin_per_unit)
 
 
 def calculate_position_size(account_balance, risk_percent, entry_price, stop_loss,
-                              instrument, quote_conversion_rate=None):
+                              instrument, quote_conversion_rate=None,
+                              margin_available=None, margin_rate=None,
+                              quiet=False):
     """
     OANDA position sizing (units = amount of BASE currency).
 
-    USD risk per 1 unit at stop = stop_distance_in_quote * quote_to_usd.
+    Final size = min(risk_based_units, margin_safe_units, HARD_MAX_UNITS)
 
     USD_JPY walkthrough ($100k, 1% risk, entry=150.00, SL=149.85 = 15 pips):
       risk_amount   = 100000 * 0.01 = $1000
-      stop_distance = |150.00 - 149.85| = 0.15 JPY per unit
-      quote_to_usd  = 1/150  (1 JPY ≈ $0.006667)
+      stop_distance = 0.15 JPY
+      quote_to_usd  = 1/150
       usd_risk/unit = 0.15 * (1/150) = $0.001
-      units         = 1000 / 0.001 = 1,000,000 uncapped
-
-    BUT: previous bug stored fake "pips" as dollar PnL (move/0.0001), which
-    made a real ~$41 loss on 50k units look like -$1240. That was logging,
-    not proof that units should be 1k–8k.
-
-    Realistic OANDA lots for 1% of $100k @ 15 pips ARE large (0.1–10 lots).
-    We still apply MAX_POSITION_UNITS (20k) as a hard ceiling so a tight/
-    mispriced stop cannot open a mega order. Risk is then <1% by design.
+      risk_units    = 1000 / 0.001 = 1,000,000
+      margin_safe   = (marginAvail * 0.30) / (marginRate * 1.0)
+      final         = min(risk_units, margin_safe, 500_000)
     """
     risk_amount = account_balance * (risk_percent / 100)
     stop_distance = abs(float(entry_price) - float(stop_loss))
@@ -97,81 +136,140 @@ def calculate_position_size(account_balance, risk_percent, entry_price, stop_los
 
     # quote_to_usd: how many USD one unit of quote currency is worth
     if quote == "USD":
-        # EUR_USD, AUD_USD, XAU_USD: PnL already in USD
-        # usd_per_unit_at_stop = stop_distance * 1.0
         quote_to_usd = 1.0
     elif base == "USD":
-        # USD_JPY, USD_CAD, USD_CHF:
-        # PnL in quote, convert to USD by dividing by price
-        # usd_per_unit_at_stop = stop_distance / entry_price
         quote_to_usd = 1.0 / float(entry_price)
     else:
-        # EUR_GBP etc. — use live quote→USD rate if provided
         quote_to_usd = float(quote_conversion_rate) if quote_conversion_rate else 1.0
 
     usd_risk_per_unit = stop_distance * quote_to_usd
     if usd_risk_per_unit <= 0:
         return 0
 
-    raw_units = int(risk_amount / usd_risk_per_unit)
+    risk_units = int(risk_amount / usd_risk_per_unit)
 
-    # Last-resort ceiling (not the primary risk control)
-    units = max(min(raw_units, MAX_POSITION_UNITS), 0)
+    m_safe = margin_safe_units(
+        instrument, entry_price, margin_available, margin_rate,
+        quote_conversion_rate,
+    )
 
-    print(f"\nPosition Size:")
-    print(f"   Balance       : ${account_balance:,.2f}")
-    print(f"   Risk %        : {risk_percent}%")
-    print(f"   Risk $        : ${risk_amount:,.2f}")
-    print(f"   Entry         : {entry_price}")
-    print(f"   Stop Loss     : {stop_loss}")
-    print(f"   SL Dist       : {stop_distance}")
-    print(f"   Quote->USD     : {quote_to_usd:.8f}")
-    print(f"   $/unit @ stop : ${usd_risk_per_unit:.8f}")
-    print(f"   Raw units     : {raw_units:,}")
-    print(f"   Units (capped): {units:,}"
-          f"{' [HIT CAP]' if raw_units > MAX_POSITION_UNITS else ''}")
+    units = max(min(risk_units, m_safe, HARD_MAX_UNITS), 0)
+
+    binders = []
+    if units == risk_units:
+        binders.append("risk")
+    if units == m_safe and m_safe < risk_units:
+        binders.append("margin")
+    if units == HARD_MAX_UNITS and HARD_MAX_UNITS < risk_units:
+        binders.append("hard_max")
+    binder = "+".join(binders) if binders else "none"
+
+    if not quiet:
+        print(f"\nPosition Size:")
+        print(f"   Balance        : ${account_balance:,.2f}")
+        print(f"   Risk %         : {risk_percent}%")
+        print(f"   Risk $         : ${risk_amount:,.2f}")
+        print(f"   Entry          : {entry_price}")
+        print(f"   Stop Loss      : {stop_loss}")
+        print(f"   SL Dist        : {stop_distance}")
+        print(f"   Quote->USD     : {quote_to_usd:.8f}")
+        print(f"   $/unit @ stop  : ${usd_risk_per_unit:.8f}")
+        print(f"   Risk units     : {risk_units:,}")
+        if margin_available is not None and margin_rate is not None:
+            print(f"   Margin avail   : ${float(margin_available):,.2f}")
+            print(f"   Margin rate    : {float(margin_rate)}")
+            print(f"   Margin budget  : {MARGIN_USAGE_FRACTION*100:.0f}% "
+                  f"= ${float(margin_available)*MARGIN_USAGE_FRACTION:,.2f}")
+            print(f"   Margin-safe    : {m_safe:,}")
+        else:
+            print(f"   Margin-safe    : n/a (using hard max {HARD_MAX_UNITS:,})")
+        print(f"   Hard max       : {HARD_MAX_UNITS:,}")
+        print(f"   Final units    : {units:,}  [binding: {binder}]")
 
     return units
 
 
 def run_position_size_self_test():
     """
-    Startup sanity check — prints expected sizes for 3 pairs so a restart
-    immediately proves the formula is behaving.
+    Startup sanity check — prints risk-based vs margin-based ceilings
+    for 3 pairs so a restart proves sizing is not flat-capped.
     """
     print("\n" + "=" * 60)
-    print("  POSITION SIZE SELF-TEST ($100k, 1% risk, 15-pip stop)")
+    print("  POSITION SIZE SELF-TEST ($100k, 1% risk)")
     print("=" * 60)
 
-    scenarios = [
-        # instrument, entry, stop (15 pips away)
-        ("EUR_USD", 1.10000, 1.10000 - 15 * 0.0001),
-        ("USD_JPY", 150.000, 150.000 - 15 * 0.01),
-        ("AUD_USD", 0.65000, 0.65000 - 15 * 0.0001),
+    margin_available = None
+    live_rates = {}
+    try:
+        from broker.oanda import get_account_summary, get_instrument_margin_rate
+        account = get_account_summary()
+        margin_available = float(account.get("marginAvailable") or 0) or None
+        for inst in ("EUR_USD", "USD_JPY", "AUD_USD"):
+            live_rates[inst] = get_instrument_margin_rate(inst)
+        if margin_available:
+            print(f"  Live marginAvailable: ${margin_available:,.2f}")
+    except Exception as e:
+        print(f"  WARNING: Live margin fetch failed ({e}) — "
+              f"using simulated $100k free margin")
+        margin_available = 100000.0
+        live_rates = {"EUR_USD": 0.02, "USD_JPY": 0.05, "AUD_USD": 0.03}
+
+    defaults = {"EUR_USD": 0.02, "USD_JPY": 0.05, "AUD_USD": 0.03}
+    for k, v in defaults.items():
+        if live_rates.get(k) is None:
+            live_rates[k] = v
+        print(f"  {k} marginRate={live_rates[k]}")
+
+    # 15-pip (tight) + 30-pip (typical H1 ATR-style) so we can see when
+    # RISK binds vs HARD_MAX on very tight stops.
+    scenario_sets = [
+        ("15-pip stop (tight)", [
+            ("EUR_USD", 1.10000, 1.10000 - 15 * 0.0001),
+            ("USD_JPY", 150.000, 150.000 - 15 * 0.01),
+            ("AUD_USD", 0.65000, 0.65000 - 15 * 0.0001),
+        ]),
+        ("30-pip stop (typical ATR)", [
+            ("EUR_USD", 1.10000, 1.10000 - 30 * 0.0001),
+            ("USD_JPY", 150.000, 150.000 - 30 * 0.01),
+            ("AUD_USD", 0.65000, 0.65000 - 30 * 0.0001),
+        ]),
     ]
 
-    for instrument, entry, stop in scenarios:
-        stop_distance = abs(entry - stop)
-        risk_amount = 1000.0
-        if instrument.endswith("_USD"):
-            usd_per_unit = stop_distance
-            expected_uncapped = int(risk_amount / usd_per_unit)
-        elif instrument.startswith("USD_"):
-            usd_per_unit = stop_distance / entry
-            expected_uncapped = int(risk_amount / usd_per_unit)
-        else:
-            expected_uncapped = 0
+    for label, scenarios in scenario_sets:
+        print(f"\n  --- {label} ---")
+        print(f"  {'Pair':<10} {'Risk':>10} {'MarginSafe':>12} "
+              f"{'HardMax':>10} {'Final':>10} {'$ at stop':>10} Binding")
+        print("  " + "-" * 72)
 
-        units = calculate_position_size(100000, 1.0, entry, stop, instrument)
-        # Correct USD P&L if stopped out at this size:
-        if instrument.startswith("USD_"):
-            actual_risk = units * stop_distance / entry
-        else:
-            actual_risk = units * stop_distance
+        for instrument, entry, stop in scenarios:
+            stop_distance = abs(entry - stop)
+            risk_amount = 1000.0
+            if instrument.startswith("USD_"):
+                risk_units = int(risk_amount / (stop_distance / entry))
+                usd_at = lambda u, sd=stop_distance, ep=entry: u * sd / ep
+            else:
+                risk_units = int(risk_amount / stop_distance)
+                usd_at = lambda u, sd=stop_distance: u * sd
 
-        print(f"   {instrument}: units={units:,} | "
-              f"uncapped_math={expected_uncapped:,} | "
-              f"$ at stop~{actual_risk:,.2f}")
+            m_rate = live_rates[instrument]
+            m_safe = margin_safe_units(
+                instrument, entry, margin_available, m_rate
+            )
+            final = calculate_position_size(
+                100000, 1.0, entry, stop, instrument,
+                margin_available=margin_available,
+                margin_rate=m_rate,
+                quiet=True,
+            )
+            binding = (
+                "RISK" if final == risk_units else
+                "MARGIN" if final == m_safe else
+                "HARD_MAX" if final == HARD_MAX_UNITS else
+                "OTHER"
+            )
+            print(f"  {instrument:<10} {risk_units:>10,} {m_safe:>12,} "
+                  f"{HARD_MAX_UNITS:>10,} {final:>10,} "
+                  f"{usd_at(final):>10,.2f} {binding}")
 
     print("=" * 60)
 
@@ -383,7 +481,8 @@ def full_risk_check(account_balance, starting_balance,
                      open_trade_count, entry_price,
                      stop_loss, take_profit, direction,
                      atr, instrument="EUR_USD",
-                     peak_balance=None, avg_atr=None):
+                     peak_balance=None, avg_atr=None,
+                     margin_available=None, margin_rate=None):
     """
     Master risk check. Every single condition must pass
     before the AI is allowed to place a trade.
@@ -452,7 +551,7 @@ def full_risk_check(account_balance, starting_balance,
         all_passed = False
         block_reason.append("R/R ratio too low")
 
-    # 8. Dynamic position sizing
+    # 8. Dynamic position sizing (risk-based, margin-capped)
     risk_pct = get_dynamic_risk_percent(account_balance, drawdown_pct)
 
     if risk_pct == 0:
@@ -461,7 +560,9 @@ def full_risk_check(account_balance, starting_balance,
         units = 0
     else:
         units = calculate_position_size(
-            account_balance, risk_pct, entry_price, stop_loss, instrument
+            account_balance, risk_pct, entry_price, stop_loss, instrument,
+            margin_available=margin_available,
+            margin_rate=margin_rate,
         )
         if units <= 0:
             all_passed = False

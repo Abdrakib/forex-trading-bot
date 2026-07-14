@@ -28,7 +28,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # ── Broker ──
-from broker.oanda  import get_account_summary, get_price
+from broker.oanda  import get_account_summary, get_price, get_instrument_margin_rate
 from broker.orders import place_order, close_all_trades, get_open_trades
 
 # ── Data ──
@@ -433,7 +433,16 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
     if decision.get("take_profit"):
         take_profit = decision["take_profit"]
 
-    # Full risk check
+    # Full risk check — pass live margin so size = min(risk, 30% margin budget)
+    margin_available = None
+    margin_rate = None
+    try:
+        acct = get_account_summary()
+        margin_available = float(acct.get("marginAvailable") or 0) or None
+        margin_rate = get_instrument_margin_rate(instrument)
+    except Exception as e:
+        print(f"   WARNING: Margin lookup failed ({e}) — sizing uses hard max only")
+
     approved, units = full_risk_check(
         account_balance  = account_balance,
         starting_balance = STARTING_BALANCE,
@@ -445,7 +454,9 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
         atr              = atr,
         instrument       = instrument,
         peak_balance     = PEAK_BALANCE,
-        avg_atr          = atr
+        avg_atr          = atr,
+        margin_available = margin_available,
+        margin_rate      = margin_rate,
     )
 
     if not approved or units <= 0:

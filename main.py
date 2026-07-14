@@ -16,7 +16,7 @@ env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from broker.oanda       import get_account_summary, get_price
+from broker.oanda       import get_account_summary, get_price, get_instrument_margin_rate
 from broker.orders      import place_order, close_all_trades, get_open_trades
 from data.price_feed    import get_multi_timeframe, get_market_snapshot
 from data.indicators    import add_all_indicators, get_signal_summary
@@ -291,6 +291,15 @@ def run_trading_cycle(cycle_number):
         print(f"\nAttempting {action} on {instrument}...")
         print_decision(decision)
 
+        margin_available = None
+        margin_rate = None
+        try:
+            acct = get_account_summary()
+            margin_available = float(acct.get("marginAvailable") or 0) or None
+            margin_rate = get_instrument_margin_rate(instrument)
+        except Exception as e:
+            print(f"WARNING: Margin lookup failed ({e})")
+
         approved, units = full_risk_check(
             account_balance  = account_balance,
             starting_balance = STARTING_BALANCE,
@@ -302,7 +311,9 @@ def run_trading_cycle(cycle_number):
             atr              = atr,
             instrument       = instrument,
             peak_balance     = PEAK_BALANCE,
-            avg_atr          = avg_atr
+            avg_atr          = avg_atr,
+            margin_available = margin_available,
+            margin_rate      = margin_rate,
         )
 
         if approved and units > 0:

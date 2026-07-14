@@ -17,7 +17,7 @@ HEADERS = {
 }
 
 def get_account_summary():
-    """Get account balance and basic info"""
+    """Get account balance, margin, and basic info"""
     url = f"{BASE_URL}/v3/accounts/{ACCOUNT_ID}/summary"
     response = requests.get(url, headers=HEADERS)
     data = response.json()
@@ -26,11 +26,41 @@ def get_account_summary():
     if not account.get("id"):
         print(f"WARNING: Account summary missing id: {data}")
         return account
-    print(f"✅ Account ID:       {account.get('id')}")
-    print(f"✅ Balance:          ${float(account.get('balance', 0)):,.2f}")
-    print(f"✅ Open Trades:      {account.get('openTradeCount', 0)}")
-    print(f"✅ Unrealized P&L:   ${float(account.get('unrealizedPL', 0)):,.2f}")
+    print(f"Account ID:       {account.get('id')}")
+    print(f"Balance:          ${float(account.get('balance', 0)):,.2f}")
+    print(f"Margin Available: ${float(account.get('marginAvailable', 0)):,.2f}")
+    print(f"Margin Used:      ${float(account.get('marginUsed', 0)):,.2f}")
+    print(f"Open Trades:      {account.get('openTradeCount', 0)}")
+    print(f"Unrealized P&L:   ${float(account.get('unrealizedPL', 0)):,.2f}")
     return account
+
+
+def get_instrument_margin_rate(instrument):
+    """
+    Fetch OANDA marginRate for one instrument (e.g. 0.02 = 50:1).
+    Returns float or None on failure.
+    """
+    url = f"{BASE_URL}/v3/accounts/{ACCOUNT_ID}/instruments"
+    try:
+        response = requests.get(
+            url, headers=HEADERS,
+            params={"instruments": instrument},
+            timeout=15,
+        )
+        data = response.json()
+        instruments = data.get("instruments") or []
+        if not instruments:
+            print(f"WARNING: No instrument data for {instrument}: {data}")
+            return None
+        rate = instruments[0].get("marginRate")
+        if rate is None:
+            print(f"WARNING: marginRate missing for {instrument}")
+            return None
+        return float(rate)
+    except Exception as e:
+        print(f"WARNING: Failed to fetch marginRate for {instrument}: {e}")
+        return None
+
 
 def get_price(instrument="XAU_USD"):
     """Get current price of any instrument"""
