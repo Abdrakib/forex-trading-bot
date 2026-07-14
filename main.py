@@ -30,7 +30,8 @@ from intelligence.sentiment import get_sentiment_context
 from intelligence.market_session import (get_current_session, get_active_pairs,
                                           filter_correlated_pairs, get_session_context)
 from learning.journal   import (init_database, log_trade_open,
-                                 log_trade_close, get_performance_stats)
+                                 log_trade_close, get_performance_stats,
+                                 calculate_usd_pnl, price_move_to_pips)
 from learning.feedback  import run_feedback_loop, get_rules_context
 from dashboard.telegram_alerts import (
     alert_startup, alert_trade_opened, alert_trade_closed,
@@ -314,14 +315,24 @@ def run_trading_cycle(cycle_number):
             )
 
             if fill:
-                trade_id = fill["tradeOpened"]["tradeID"]
+                trade_opened = fill.get("tradeOpened") or {}
+                trade_id = trade_opened.get("tradeID")
+                fill_price = fill.get("price")
+                if not trade_id or not fill_price:
+                    print(f"WARNING: Fill missing tradeID/price: {fill}")
+                    continue
+
+                order_units = units
+                fill_units_raw = trade_opened.get("units") or fill.get("units")
+                if fill_units_raw is not None:
+                    order_units = abs(int(float(fill_units_raw)))
 
                 log_trade_open(
                     trade_id      = trade_id,
                     instrument    = instrument,
                     direction     = direction,
-                    units         = units,
-                    entry_price   = float(fill["price"]),
+                    units         = order_units,
+                    entry_price   = float(fill_price),
                     stop_loss     = stop_loss,
                     take_profit   = take_profit,
                     indicators    = h1_summary,
@@ -333,8 +344,8 @@ def run_trading_cycle(cycle_number):
                 alert_trade_opened(
                     instrument = instrument,
                     direction  = action,
-                    units      = units,
-                    entry      = fill["price"],
+                    units      = order_units,
+                    entry      = fill_price,
                     sl         = stop_loss,
                     tp         = take_profit,
                     confidence = confidence,
@@ -344,7 +355,7 @@ def run_trading_cycle(cycle_number):
                 trades_placed    += 1
                 open_trade_count += 1
 
-                print(f"Trade placed! ID: {trade_id}")
+                print(f"Trade placed! ID: {trade_id} | units={order_units:,}")
 
     if trades_placed == 0 and not filtered_pairs:
         print("\nNo high-confidence setups found this cycle. HOLD.")
@@ -358,21 +369,33 @@ def run_trading_cycle(cycle_number):
         conn = sqlite3.connect(DB_PATH)
         c    = conn.cursor()
         c.execute("""
-            SELECT trade_id, entry_price, direction, instrument
+            SELECT trade_id, entry_price, direction, instrument, units
             FROM trades WHERE status='OPEN'
             AND trade_id NOT LIKE 'TEST%'
         """)
         db_open = c.fetchall()
         conn.close()
 
-        for db_id, db_entry, db_dir, db_inst in db_open:
+        for db_id, db_entry, db_dir, db_inst, db_units in db_open:
             if str(db_id) not in open_ids:
                 try:
                     exit_price = get_price(db_inst)
-                    if db_dir == "BUY":
-                        pnl = (exit_price - db_entry) * 10000
-                    else:
-                        pnl = (db_entry - exit_price) * 10000
+                    if exit_price is None:
+                        continue
+
+                    pnl = calculate_usd_pnl(
+                        db_inst or "EUR_USD",
+                        db_units or 0,
+                        db_entry,
+                        exit_price,
+                        db_dir or "BUY",
+                    )
+                    pips = price_move_to_pips(
+                        db_inst or "EUR_USD",
+                        db_entry,
+                        exit_price,
+                        db_dir or "BUY",
+                    )
 
                     log_trade_close(
                         trade_id   = db_id,
@@ -386,11 +409,11 @@ def run_trading_cycle(cycle_number):
                         entry      = db_entry,
                         exit_price = exit_price,
                         pnl        = round(pnl, 2),
-                        pips       = round(pnl, 1),
+                        pips       = round(pips, 1),
                         outcome    = "WIN" if pnl > 0 else "LOSS",
                         duration   = 0
                     )
-                    print(f"Trade {db_id} closed. P&L: ${pnl:.2f}")
+                    print(f"Trade {db_id} closed. P&L: ${pnl:.2f} | Pips: {pips:.1f}")
                 except Exception as e:
                     print(f"Error closing trade {db_id}: {e}")
 

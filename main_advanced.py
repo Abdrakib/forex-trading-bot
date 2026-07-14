@@ -42,7 +42,8 @@ from data.macro_filters import get_macro_context
 from brain.decision       import make_trading_decision, print_decision
 from brain.risk           import (full_risk_check, check_daily_loss_limit,
                                    check_drawdown, get_daily_trade_count,
-                                   calculate_atr_stop_loss, get_dynamic_risk_percent)
+                                   calculate_atr_stop_loss, get_dynamic_risk_percent,
+                                   run_position_size_self_test)
 from brain.execution      import manage_open_trade
 from brain.limit_orders   import (calculate_limit_entry,
                                    calculate_smc_limit_entry,
@@ -61,7 +62,8 @@ from intelligence.cot_report       import get_cot_context, get_weekly_cot_summar
 
 # ── Learning ──
 from learning.journal  import (init_database, log_trade_open,
-                                log_trade_close, get_performance_stats)
+                                log_trade_close, get_performance_stats,
+                                calculate_usd_pnl, price_move_to_pips)
 from learning.feedback import run_feedback_loop, get_rules_context
 
 # ── Alerts ──
@@ -94,6 +96,9 @@ def startup():
     print("=" * 60)
 
     init_database()
+
+    # Prove position sizing formula is sane before any live cycle
+    run_position_size_self_test()
 
     account          = get_account_summary()
     STARTING_BALANCE = float(account.get("balance", 0))
@@ -456,11 +461,15 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
     print(f"   Take Profit : {take_profit}")
     print(f"   Units       : {units:,}")
 
+    # Single source of truth: sized units → broker order → DB log (same value).
+    # After a market fill, prefer OANDA's confirmed filled units if present.
+    order_units = units
+
     if use_limit and limit_price != current_price:
         # Place limit order
         order_id, data = place_limit_order(
             instrument  = instrument,
-            units       = units,
+            units       = order_units,
             direction   = direction,
             limit_price = limit_price,
             stop_loss   = stop_loss,
@@ -469,12 +478,12 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
         )
 
         if order_id:
-            # Log as pending
+            # Log the SAME units sent to the broker
             log_trade_open(
                 trade_id      = f"LIMIT_{order_id}",
                 instrument    = instrument,
                 direction     = direction,
-                units         = units,
+                units         = order_units,
                 entry_price   = limit_price,
                 stop_loss     = stop_loss,
                 take_profit   = take_profit,
@@ -487,7 +496,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
             alert_trade_opened(
                 instrument = instrument,
                 direction  = action,
-                units      = units,
+                units      = order_units,
                 entry      = limit_price,
                 sl         = stop_loss,
                 tp         = take_profit,
@@ -505,7 +514,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
     # Market order (for breakouts or if limit failed)
     fill = place_order(
         instrument  = instrument,
-        units       = units,
+        units       = order_units,
         direction   = direction,
         stop_loss   = stop_loss,
         take_profit = take_profit,
@@ -519,11 +528,16 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
             print(f"WARNING: Market fill missing tradeID or price: {fill}")
             return False
 
+        # Prefer broker-confirmed units so DB always matches what OANDA filled
+        fill_units_raw = trade_opened.get("units") or fill.get("units")
+        if fill_units_raw is not None:
+            order_units = abs(int(float(fill_units_raw)))
+
         log_trade_open(
             trade_id      = trade_id,
             instrument    = instrument,
             direction     = direction,
-            units         = units,
+            units         = order_units,
             entry_price   = float(fill_price),
             stop_loss     = stop_loss,
             take_profit   = take_profit,
@@ -536,7 +550,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
         alert_trade_opened(
             instrument = instrument,
             direction  = action,
-            units      = units,
+            units      = order_units,
             entry      = fill_price,
             sl         = stop_loss,
             tp         = take_profit,
@@ -545,7 +559,7 @@ def execute_trade(instrument, result, account_balance, open_trade_count):
                         decision.get("reasoning", "")[:200]
         )
 
-        print(f"   Market order filled at {fill_price}")
+        print(f"   Market order filled at {fill_price} | units={order_units:,}")
         return True
 
     return False
@@ -708,29 +722,43 @@ def run_trading_cycle(cycle_number):
         conn = sqlite3.connect(DB_PATH)
         c    = conn.cursor()
         c.execute("""
-            SELECT trade_id, entry_price, direction, instrument
+            SELECT trade_id, entry_price, direction, instrument, units
             FROM trades
             WHERE status='OPEN'
             AND trade_id NOT LIKE 'TEST%'
             AND trade_id NOT LIKE 'LIMIT_%'
         """)
-        for db_id, db_entry, db_dir, db_inst in c.fetchall():
+        for db_id, db_entry, db_dir, db_inst, db_units in c.fetchall():
             if str(db_id) not in open_ids:
                 try:
                     exit_price = get_price(db_inst or "EUR_USD")
-                    if db_dir == "BUY":
-                        pnl = (exit_price - db_entry) / 0.0001
-                    else:
-                        pnl = (db_entry - exit_price) / 0.0001
+                    if exit_price is None:
+                        print(f"WARNING: No exit price for {db_id}, skipping close log")
+                        continue
+
+                    # REALIZED USD — never use price_diff/0.0001 as dollars
+                    pnl = calculate_usd_pnl(
+                        db_inst or "EUR_USD",
+                        db_units or 0,
+                        db_entry,
+                        exit_price,
+                        db_dir or "BUY",
+                    )
+                    pips = price_move_to_pips(
+                        db_inst or "EUR_USD",
+                        db_entry,
+                        exit_price,
+                        db_dir or "BUY",
+                    )
 
                     log_trade_close(db_id, exit_price, round(pnl, 2))
                     alert_trade_closed(
                         db_inst or "EUR_USD", db_dir or "BUY",
                         db_entry, exit_price,
-                        round(pnl, 2), round(pnl, 1),
+                        round(pnl, 2), round(pips, 1),
                         "WIN" if pnl > 0 else "LOSS", 0
                     )
-                    print(f"Trade {db_id} closed. P&L: ${pnl:.2f}")
+                    print(f"Trade {db_id} closed. P&L: ${pnl:.2f} | Pips: {pips:.1f}")
                 except Exception as e:
                     tb = traceback.format_exc()
                     print(f"Error logging closed trade {db_id}: {e}\n{tb}")

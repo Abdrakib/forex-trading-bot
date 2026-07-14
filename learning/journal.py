@@ -16,6 +16,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 DB_PATH = Path(__file__).resolve().parent.parent / "database" / "trades.db"
 
 
+def price_move_to_pips(instrument, entry_price, exit_price, direction="BUY"):
+    """
+    Signed pip move. JPY pairs: 0.01 = 1 pip. Others: 0.0001 = 1 pip.
+    """
+    if not entry_price or not exit_price:
+        return 0.0
+    raw = (exit_price - entry_price) if direction.upper() == "BUY" else (entry_price - exit_price)
+    if "JPY" in instrument:
+        return raw * 100
+    return raw * 10000
+
+
+def calculate_usd_pnl(instrument, units, entry_price, exit_price, direction="BUY"):
+    """
+    Approximate realized USD P&L for OANDA forex units.
+    XXX_USD: pnl = units * price_diff
+    USD_XXX: pnl = units * price_diff / exit_price  (quote→USD)
+    """
+    if not units or not entry_price or not exit_price:
+        return 0.0
+    units = abs(float(units))
+    signed = (exit_price - entry_price) if direction.upper() == "BUY" else (entry_price - exit_price)
+    parts = instrument.split("_") if instrument else ["", "USD"]
+    base = parts[0] if len(parts) > 0 else ""
+    quote = parts[1] if len(parts) > 1 else "USD"
+
+    if quote == "USD":
+        return units * signed
+    if base == "USD":
+        return units * signed / float(exit_price)
+    # Cross pair: approximate as if quote were USD (better than /0.0001)
+    return units * signed
+
+
 # ─────────────────────────────────────────────
 #  INITIALIZE DATABASE
 # ─────────────────────────────────────────────
@@ -147,22 +181,25 @@ def log_trade_close(trade_id, exit_price, pnl, lesson_learned=None):
     """
     Update trade record when it closes.
     Calculates duration, outcome, and stores lesson.
+    pnl must be REALIZED USD (not raw pips).
     """
     conn = sqlite3.connect(DB_PATH)
     c    = conn.cursor()
 
     close_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get open time to calculate duration
-    c.execute("SELECT open_time, entry_price, direction FROM trades WHERE trade_id = ?",
-              (str(trade_id),))
+    # Get open time / context for duration + proper pip calc
+    c.execute("""
+        SELECT open_time, entry_price, direction, instrument, units
+        FROM trades WHERE trade_id = ?
+    """, (str(trade_id),))
     row = c.fetchone()
 
     duration_minutes = 0
     pnl_pips         = 0
 
     if row:
-        open_time_str, entry_price, direction = row
+        open_time_str, entry_price, direction, instrument, units = row
         try:
             open_dt  = datetime.strptime(open_time_str, "%Y-%m-%d %H:%M:%S")
             close_dt = datetime.strptime(close_time,    "%Y-%m-%d %H:%M:%S")
@@ -170,12 +207,11 @@ def log_trade_close(trade_id, exit_price, pnl, lesson_learned=None):
         except:
             duration_minutes = 0
 
-        # Calculate pips
+        # Proper pip count (JPY vs non-JPY). Never confuse pips with dollars.
         if entry_price and exit_price:
-            if direction == "BUY":
-                pnl_pips = (exit_price - entry_price) / 0.0001
-            else:
-                pnl_pips = (entry_price - exit_price) / 0.0001
+            pnl_pips = price_move_to_pips(
+                instrument or "", entry_price, exit_price, direction or "BUY"
+            )
 
     outcome = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "BREAK_EVEN"
 

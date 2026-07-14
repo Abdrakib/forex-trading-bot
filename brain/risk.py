@@ -58,45 +58,122 @@ def get_dynamic_risk_percent(account_balance, drawdown_pct=0):
 # ─────────────────────────────────────────────
 #  POSITION SIZING
 # ─────────────────────────────────────────────
+# Last-resort ceiling only — formula itself must produce sane sizes.
+MAX_POSITION_UNITS = 20000
+
+
 def calculate_position_size(account_balance, risk_percent, entry_price, stop_loss,
                               instrument, quote_conversion_rate=None):
     """
-    Universal position sizing:
-    risk_amount (USD) = balance * risk%
-    stop_distance = |entry - stop_loss| in quote currency per unit
-    units = risk_amount / (stop_distance * quote_to_usd_rate)
+    OANDA position sizing (units = amount of BASE currency).
+
+    USD risk per 1 unit at stop = stop_distance_in_quote * quote_to_usd.
+
+    USD_JPY walkthrough ($100k, 1% risk, entry=150.00, SL=149.85 = 15 pips):
+      risk_amount   = 100000 * 0.01 = $1000
+      stop_distance = |150.00 - 149.85| = 0.15 JPY per unit
+      quote_to_usd  = 1/150  (1 JPY ≈ $0.006667)
+      usd_risk/unit = 0.15 * (1/150) = $0.001
+      units         = 1000 / 0.001 = 1,000,000 uncapped
+
+    BUT: previous bug stored fake "pips" as dollar PnL (move/0.0001), which
+    made a real ~$41 loss on 50k units look like -$1240. That was logging,
+    not proof that units should be 1k–8k.
+
+    Realistic OANDA lots for 1% of $100k @ 15 pips ARE large (0.1–10 lots).
+    We still apply MAX_POSITION_UNITS (20k) as a hard ceiling so a tight/
+    mispriced stop cannot open a mega order. Risk is then <1% by design.
     """
     risk_amount = account_balance * (risk_percent / 100)
-    stop_distance = abs(entry_price - stop_loss)
-    if stop_distance <= 0:
+    stop_distance = abs(float(entry_price) - float(stop_loss))
+    if stop_distance <= 0 or entry_price <= 0:
         return 0
 
-    # Convert quote currency to USD
-    quote = instrument.split("_")[1]
+    parts = instrument.split("_")
+    if len(parts) != 2:
+        print(f"WARNING: Bad instrument format for sizing: {instrument}")
+        return 0
+    base, quote = parts[0], parts[1]
+
+    # quote_to_usd: how many USD one unit of quote currency is worth
     if quote == "USD":
-        conversion = 1.0
-    elif instrument.startswith("USD_"):
-        # e.g. USD_JPY: quote is JPY, 1 JPY = 1/price USD
-        conversion = 1.0 / entry_price
+        # EUR_USD, AUD_USD, XAU_USD: PnL already in USD
+        # usd_per_unit_at_stop = stop_distance * 1.0
+        quote_to_usd = 1.0
+    elif base == "USD":
+        # USD_JPY, USD_CAD, USD_CHF:
+        # PnL in quote, convert to USD by dividing by price
+        # usd_per_unit_at_stop = stop_distance / entry_price
+        quote_to_usd = 1.0 / float(entry_price)
     else:
-        # Cross pairs (EUR_GBP etc): use provided rate or approximate
-        conversion = quote_conversion_rate if quote_conversion_rate else 1.0
+        # EUR_GBP etc. — use live quote→USD rate if provided
+        quote_to_usd = float(quote_conversion_rate) if quote_conversion_rate else 1.0
 
-    units = int(risk_amount / (stop_distance * conversion))
+    usd_risk_per_unit = stop_distance * quote_to_usd
+    if usd_risk_per_unit <= 0:
+        return 0
 
-    # Sanity caps: never exceed 50,000 units, never below 100
-    units = max(min(units, 50000), 0)
+    raw_units = int(risk_amount / usd_risk_per_unit)
+
+    # Last-resort ceiling (not the primary risk control)
+    units = max(min(raw_units, MAX_POSITION_UNITS), 0)
 
     print(f"\nPosition Size:")
-    print(f"   Balance    : ${account_balance:,.2f}")
-    print(f"   Risk %     : {risk_percent}%")
-    print(f"   Risk $     : ${risk_amount:,.2f}")
-    print(f"   Entry      : {entry_price}")
-    print(f"   Stop Loss  : {stop_loss}")
-    print(f"   SL Dist    : {stop_distance}")
-    print(f"   Units      : {units:,}")
+    print(f"   Balance       : ${account_balance:,.2f}")
+    print(f"   Risk %        : {risk_percent}%")
+    print(f"   Risk $        : ${risk_amount:,.2f}")
+    print(f"   Entry         : {entry_price}")
+    print(f"   Stop Loss     : {stop_loss}")
+    print(f"   SL Dist       : {stop_distance}")
+    print(f"   Quote->USD     : {quote_to_usd:.8f}")
+    print(f"   $/unit @ stop : ${usd_risk_per_unit:.8f}")
+    print(f"   Raw units     : {raw_units:,}")
+    print(f"   Units (capped): {units:,}"
+          f"{' [HIT CAP]' if raw_units > MAX_POSITION_UNITS else ''}")
 
     return units
+
+
+def run_position_size_self_test():
+    """
+    Startup sanity check — prints expected sizes for 3 pairs so a restart
+    immediately proves the formula is behaving.
+    """
+    print("\n" + "=" * 60)
+    print("  POSITION SIZE SELF-TEST ($100k, 1% risk, 15-pip stop)")
+    print("=" * 60)
+
+    scenarios = [
+        # instrument, entry, stop (15 pips away)
+        ("EUR_USD", 1.10000, 1.10000 - 15 * 0.0001),
+        ("USD_JPY", 150.000, 150.000 - 15 * 0.01),
+        ("AUD_USD", 0.65000, 0.65000 - 15 * 0.0001),
+    ]
+
+    for instrument, entry, stop in scenarios:
+        stop_distance = abs(entry - stop)
+        risk_amount = 1000.0
+        if instrument.endswith("_USD"):
+            usd_per_unit = stop_distance
+            expected_uncapped = int(risk_amount / usd_per_unit)
+        elif instrument.startswith("USD_"):
+            usd_per_unit = stop_distance / entry
+            expected_uncapped = int(risk_amount / usd_per_unit)
+        else:
+            expected_uncapped = 0
+
+        units = calculate_position_size(100000, 1.0, entry, stop, instrument)
+        # Correct USD P&L if stopped out at this size:
+        if instrument.startswith("USD_"):
+            actual_risk = units * stop_distance / entry
+        else:
+            actual_risk = units * stop_distance
+
+        print(f"   {instrument}: units={units:,} | "
+              f"uncapped_math={expected_uncapped:,} | "
+              f"$ at stop~{actual_risk:,.2f}")
+
+    print("=" * 60)
 
 
 # ─────────────────────────────────────────────
